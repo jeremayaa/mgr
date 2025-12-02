@@ -1,5 +1,3 @@
-
-
 COLLECTION_LIST = ['4D-Lung',
  'A091105',
  'ACNS0332',

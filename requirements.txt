@@ -1,0 +1,4 @@
+# data loading
+pandas
+tcia_utils
+requests

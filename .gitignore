@@ -1,2 +1,4 @@
 .DS_Store
-DownloadedStudy
+__pycache__
+*.csv
+data
