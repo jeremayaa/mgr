@@ -1,0 +1,210 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Dict, List
+
+import numpy as np
+import pydicom
+from matplotlib.path import Path as MplPath
+
+
+PairingDict = Dict[str, Dict[str, List[str]]]
+
+
+def _zpos(ds: pydicom.dataset.Dataset) -> float:
+    try:
+        return float(ds.ImagePositionPatient[2])
+    except Exception:
+        return float(getattr(ds, "InstanceNumber", 0))
+
+def _world_to_rc(
+    points_xyz: np.ndarray,
+    origin_xyz: np.ndarray,
+    row_cos: np.ndarray,
+    col_cos: np.ndarray,
+    pix_spacing: np.ndarray,
+) -> np.ndarray:
+    v = points_xyz - origin_xyz[None, :]
+    r = (v @ row_cos) / pix_spacing[0]
+    c = (v @ col_cos) / pix_spacing[1]
+    return np.stack([r, c], axis=1)
+
+
+def _fill_polygon_mask_bbox(
+    rows: int,
+    cols: int,
+    poly_rc: np.ndarray,
+) -> np.ndarray:
+    mask = np.zeros((rows, cols), dtype=bool)
+
+    r_min = max(int(np.floor(poly_rc[:, 0].min())), 0)
+    r_max = min(int(np.ceil(poly_rc[:, 0].max())) + 1, rows)
+    c_min = max(int(np.floor(poly_rc[:, 1].min())), 0)
+    c_max = min(int(np.ceil(poly_rc[:, 1].max())) + 1, cols)
+
+    if r_min >= r_max or c_min >= c_max:
+        return mask
+
+    rr = np.arange(r_min, r_max) + 0.5
+    cc = np.arange(c_min, c_max) + 0.5
+    CC, RR = np.meshgrid(cc, rr)
+    pts = np.stack([CC.ravel(), RR.ravel()], axis=1)
+
+    path = MplPath(poly_rc[:, ::-1])
+    inside = path.contains_points(pts)
+    inside = inside.reshape(r_max - r_min, c_max - c_min)
+
+    mask[r_min:r_max, c_min:c_max] = inside
+    return mask
+
+
+def _load_ct_volume(ct_series_dir: Path) -> tuple[np.ndarray, List[str], List[Dict[str, Any]]]:
+    ct_files = sorted(
+        [p for p in ct_series_dir.iterdir() if p.is_file() and p.suffix.lower() == ".dcm"]
+    )
+    if not ct_files:
+        raise FileNotFoundError(f"No DICOM files found in CT series directory: {ct_series_dir}")
+
+    dsets = [pydicom.dcmread(str(f)) for f in ct_files]
+    dsets.sort(key=_zpos)
+
+    imgs = np.stack([ds.pixel_array for ds in dsets]).astype(np.int16)
+
+    slope = float(getattr(dsets[0], "RescaleSlope", 1.0))
+    intercept = float(getattr(dsets[0], "RescaleIntercept", 0.0))
+    ct_hu = imgs * slope + intercept
+
+    sop_uids = [str(ds.SOPInstanceUID) for ds in dsets]
+
+    geometries: List[Dict[str, Any]] = []
+    for ds in dsets:
+        iop = np.array(ds.ImageOrientationPatient, dtype=float)
+        row_cos = iop[:3]
+        col_cos = iop[3:]
+        ipp = np.array(ds.ImagePositionPatient, dtype=float)
+        ps = np.array(ds.PixelSpacing, dtype=float)
+        geometries.append(
+            {
+                "row_cos": row_cos,
+                "col_cos": col_cos,
+                "ipp": ipp,
+                "ps": ps,
+                "rows": int(ds.Rows),
+                "cols": int(ds.Columns),
+            }
+        )
+
+    return ct_hu.astype(np.float32), sop_uids, geometries
+
+
+def _find_rtstruct_dicom(rtstruct_series_dir: Path) -> Path:
+    for path in sorted(rtstruct_series_dir.rglob("*.dcm")):
+        try:
+            ds = pydicom.dcmread(str(path), stop_before_pixels=True, force=True)
+            modality = getattr(ds, "Modality", None)
+            if isinstance(modality, str) and modality.upper() == "RTSTRUCT":
+                return path
+        except Exception:
+            continue
+    raise FileNotFoundError(f"No RTSTRUCT DICOM found in {rtstruct_series_dir}")
+
+
+def _rtstruct_to_volume(
+    rtstruct_path: Path,
+    sop_uids: List[str],
+    geometries: List[Dict[str, Any]],
+) -> np.ndarray:
+    ds = pydicom.dcmread(str(rtstruct_path), stop_before_pixels=True)
+
+    depth = len(sop_uids)
+    rows = int(geometries[0]["rows"])
+    cols = int(geometries[0]["cols"])
+    seg_vol = np.zeros((depth, rows, cols), dtype=np.int16)
+
+    sop_to_index = {sop: idx for idx, sop in enumerate(sop_uids)}
+
+    for rc in getattr(ds, "ROIContourSequence", []):
+        roi_num = int(rc.ReferencedROINumber)
+
+        for cnt in getattr(rc, "ContourSequence", []):
+            cis = getattr(cnt, "ContourImageSequence", [])
+            if not cis:
+                continue
+
+            ref_sop = str(cis[0].ReferencedSOPInstanceUID)
+            if ref_sop not in sop_to_index:
+                continue
+
+            slice_idx = sop_to_index[ref_sop]
+            geom = geometries[slice_idx]
+            row_cos = geom["row_cos"]
+            col_cos = geom["col_cos"]
+            ipp = geom["ipp"]
+            ps = geom["ps"]
+
+            coords = np.array(cnt.ContourData, dtype=float).reshape(-1, 3)
+            poly_rc = _world_to_rc(coords, ipp, row_cos, col_cos, ps)
+
+            mask2d = _fill_polygon_mask_bbox(rows, cols, poly_rc)
+
+            mask2d = np.rot90(mask2d, k=1)
+            mask2d = np.flipud(mask2d)
+
+            seg_vol[slice_idx][mask2d] = roi_num
+
+    return seg_vol
+
+
+def pairs_to_numpy(x_y_pairing: PairingDict) -> PairingDict:
+    new_pairing: PairingDict = {}
+
+    for study_key, series_map in x_y_pairing.items():
+        new_series_map: Dict[str, List[str]] = {}
+
+        for ct_series_str, seg_series_list in series_map.items():
+            if not seg_series_list:
+                continue
+
+            ct_dir = Path(ct_series_str)
+            seg_dir = Path(seg_series_list[0])
+
+            ct_vol, sop_uids, geometries = _load_ct_volume(ct_dir)
+            rtstruct_path = _find_rtstruct_dicom(seg_dir)
+            seg_vol = _rtstruct_to_volume(rtstruct_path, sop_uids, geometries)
+
+            ct_npy_path = ct_dir / "ct_volume.npy"
+            seg_npy_path = seg_dir / "rtstruct_labels.npy"
+
+            np.save(ct_npy_path, ct_vol)
+            np.save(seg_npy_path, seg_vol)
+
+            new_series_map[str(ct_npy_path)] = [str(seg_npy_path)]
+
+        if new_series_map:
+            new_pairing[study_key] = new_series_map
+
+    return new_pairing
+
+
+def paths_for_np_pairing(x_y_pairing: PairingDict) -> PairingDict:
+    new_pairing: PairingDict = {}
+
+    for study_key, series_map in x_y_pairing.items():
+        new_series_map: Dict[str, List[str]] = {}
+
+        for ct_series_str, seg_series_list in series_map.items():
+            if not seg_series_list:
+                continue
+
+            ct_dir = Path(ct_series_str)
+            seg_dir = Path(seg_series_list[0])
+
+            ct_npy_path = ct_dir / "ct_volume.npy"
+            seg_npy_path = seg_dir / "rtstruct_labels.npy"
+
+            new_series_map[str(ct_npy_path)] = [str(seg_npy_path)]
+
+        if new_series_map:
+            new_pairing[study_key] = new_series_map
+
+    return new_pairing
