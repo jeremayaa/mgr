@@ -2,3 +2,5 @@
 pandas
 tcia_utils
 requests
+pydicom
+matplotlib 

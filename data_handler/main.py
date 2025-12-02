@@ -42,10 +42,10 @@ def main() -> None:
             f"Modalities: {study.modalities}"
         )
 
-    filter_mods = ["MR", "RTSTRUCT"]
-    downloader.filter_by_modalities(filter_mods)
+    # filter_mods = ["CT", "RTSTRUCT"]
+    # downloader.filter_by_modalities(None)
 
-    print(f"\nAfter filtering to {filter_mods}:")
+    # print(f"\nAfter filtering to {filter_mods}:")
     print(f"Found {len(downloader.get_ids())} studies.\n")
     for study in downloader.studies:
         print(
@@ -57,7 +57,7 @@ def main() -> None:
         )
 
     ids: List[int] = downloader.get_ids()
-    selected_ids = ids[:1]
+    selected_ids = ids[1:2]
 
     output_dir = dataset_path / collection_name
     downloader.download(selected_ids, path=output_dir)

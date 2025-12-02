@@ -183,8 +183,13 @@ class DataDownloader:
                 return study
         return None
 
-    def filter_by_modalities(self, modalities: Sequence[str]) -> None:
-        """Filter metadata to only include selected modalities and rebuild the study list."""
+    def filter_by_modalities(self, modalities: Optional[Sequence[str]] = None) -> None:
+        """Filter by modalities if provided, otherwise reset to all studies."""
+        if not modalities:
+            self._df = self._df_full.copy()
+            self._studies = self._build_studies(self._df)
+            return
+
         mask = self._df_full["Modality"].isin(modalities)
         self._df = self._df_full[mask].copy()
         self._studies = self._build_studies(self._df)
@@ -247,53 +252,40 @@ def _downloaded_study_indices(collection_dir: Path) -> List[int]:
             indices.append(idx)
     return sorted(set(indices))
 
-
 def create_manifest(data_root: str | Path, manifest_name: str = "manifest.json") -> None:
-    """Create a manifest describing only downloaded studies under a data root."""
+    """Create a manifest describing downloaded studies and series under a data root."""
     root = Path(data_root)
-    metadata_dir = root / "metadata"
-
-    if not metadata_dir.exists():
-        raise FileNotFoundError(f"Metadata directory not found: {metadata_dir}")
 
     collections: List[Dict[str, Any]] = []
 
-    for meta_path in sorted(metadata_dir.glob("*.json")):
-        collection_name = meta_path.stem
-        collection_dir = root / collection_name
-
-        downloaded_indices = _downloaded_study_indices(collection_dir)
-        if not downloaded_indices:
+    for collection_dir in sorted(root.iterdir()):
+        if not collection_dir.is_dir():
+            continue
+        if collection_dir.name == "metadata":
             continue
 
-        with meta_path.open("r", encoding="utf-8") as f:
-            metadata: List[Dict[str, Any]] = json.load(f)
-
-        downloader = DataDownloader(metadata)
-
         studies_entries: List[Dict[str, Any]] = []
-        for idx in downloaded_indices:
-            study = downloader.get_study(idx)
-            if study is None:
+
+        for study_dir in sorted(collection_dir.glob("study_*")):
+            if not study_dir.is_dir():
+                continue
+            try:
+                index = int(study_dir.name.split("_", 1)[1])
+            except ValueError:
                 continue
 
-            series_uids = (
-                study.series_rows["SeriesInstanceUID"]
-                .dropna()
-                .astype(str)
-                .tolist()
-            )
+            series_uids = [
+                child.name
+                for child in sorted(study_dir.iterdir())
+                if child.is_dir()
+            ]
+
             if not series_uids:
                 continue
 
             studies_entries.append(
                 {
-                    "index": study.index,
-                    "collection": collection_name,
-                    "study_uid": study.study_uid,
-                    "patient_id": study.patient_id,
-                    "series_date": study.series_date,
-                    "modalities": study.modalities,
+                    "index": index,
                     "series_uids": series_uids,
                 }
             )
@@ -301,7 +293,7 @@ def create_manifest(data_root: str | Path, manifest_name: str = "manifest.json")
         if studies_entries:
             collections.append(
                 {
-                    "name": collection_name,
+                    "name": collection_dir.name,
                     "studies": studies_entries,
                 }
             )
