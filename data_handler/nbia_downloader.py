@@ -176,6 +176,13 @@ class DataDownloader:
         """Return numeric study IDs for the current filter."""
         return [study.index for study in self._studies]
 
+    def get_study(self, study_id: int) -> Optional[Study]:
+        """Return a single study by numeric ID, or None if it does not exist."""
+        for study in self._studies:
+            if study.index == study_id:
+                return study
+        return None
+
     def filter_by_modalities(self, modalities: Sequence[str]) -> None:
         """Filter metadata to only include selected modalities and rebuild the study list."""
         mask = self._df_full["Modality"].isin(modalities)
@@ -193,7 +200,7 @@ class DataDownloader:
         output_path.mkdir(parents=True, exist_ok=True)
 
         for study_id in ids:
-            study = self._get_study_by_id(study_id)
+            study = self.get_study(study_id)
             if study is None:
                 continue
 
@@ -225,8 +232,134 @@ class DataDownloader:
                     max_workers=self.max_workers,
                 )
 
-    def _get_study_by_id(self, study_id: int) -> Optional[Study]:
-        for study in self._studies:
-            if study.index == study_id:
-                return study
-        return None
+
+def _downloaded_study_indices(collection_dir: Path) -> List[int]:
+    """Return study indices based on existing study_<index> folders."""
+    indices: List[int] = []
+    if not collection_dir.exists():
+        return indices
+    for child in collection_dir.iterdir():
+        if child.is_dir() and child.name.startswith("study_"):
+            try:
+                idx = int(child.name.split("_", 1)[1])
+            except ValueError:
+                continue
+            indices.append(idx)
+    return sorted(set(indices))
+
+
+def create_manifest(data_root: str | Path, manifest_name: str = "manifest.json") -> None:
+    """Create a manifest describing only downloaded studies under a data root."""
+    root = Path(data_root)
+    metadata_dir = root / "metadata"
+
+    if not metadata_dir.exists():
+        raise FileNotFoundError(f"Metadata directory not found: {metadata_dir}")
+
+    collections: List[Dict[str, Any]] = []
+
+    for meta_path in sorted(metadata_dir.glob("*.json")):
+        collection_name = meta_path.stem
+        collection_dir = root / collection_name
+
+        downloaded_indices = _downloaded_study_indices(collection_dir)
+        if not downloaded_indices:
+            continue
+
+        with meta_path.open("r", encoding="utf-8") as f:
+            metadata: List[Dict[str, Any]] = json.load(f)
+
+        downloader = DataDownloader(metadata)
+
+        studies_entries: List[Dict[str, Any]] = []
+        for idx in downloaded_indices:
+            study = downloader.get_study(idx)
+            if study is None:
+                continue
+
+            series_uids = (
+                study.series_rows["SeriesInstanceUID"]
+                .dropna()
+                .astype(str)
+                .tolist()
+            )
+            if not series_uids:
+                continue
+
+            studies_entries.append(
+                {
+                    "index": study.index,
+                    "collection": collection_name,
+                    "study_uid": study.study_uid,
+                    "patient_id": study.patient_id,
+                    "series_date": study.series_date,
+                    "modalities": study.modalities,
+                    "series_uids": series_uids,
+                }
+            )
+
+        if studies_entries:
+            collections.append(
+                {
+                    "name": collection_name,
+                    "studies": studies_entries,
+                }
+            )
+
+    manifest: Dict[str, Any] = {
+        "version": 1,
+        "collections": collections,
+    }
+
+    save_json(manifest, root / manifest_name)
+
+
+def recover_dataset(
+    data_root: str | Path,
+    manifest_name: str = "manifest.json",
+    max_workers: int = 6,
+) -> None:
+    """Reconstruct a dataset from a manifest file by re-downloading the saved series."""
+    root = Path(data_root)
+    manifest_path = root / manifest_name
+
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Manifest not found: {manifest_path}")
+
+    with manifest_path.open("r", encoding="utf-8") as f:
+        manifest: Dict[str, Any] = json.load(f)
+
+    collections = manifest.get("collections", [])
+    for collection in collections:
+        collection_name = collection.get("name")
+        if not collection_name:
+            continue
+
+        collection_root = root / collection_name
+        collection_root.mkdir(parents=True, exist_ok=True)
+
+        for study in collection.get("studies", []):
+            study_index = int(study.get("index"))
+            series_uids = study.get("series_uids", [])
+            if not series_uids:
+                continue
+
+            study_path = collection_root / f"study_{study_index}"
+            study_path.mkdir(parents=True, exist_ok=True)
+
+            try:
+                nbia.downloadSeries(
+                    series_uids,
+                    input_type="uids",
+                    path=str(study_path),
+                    as_zip=False,
+                    max_workers=max_workers,
+                )
+            except TypeError:
+                series_rows = [{"SeriesInstanceUID": uid} for uid in series_uids]
+                nbia.downloadSeries(
+                    series_rows,
+                    path=str(study_path),
+                    as_zip=False,
+                    max_workers=max_workers,
+                )
