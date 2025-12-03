@@ -15,8 +15,8 @@ def load_metadata(path: Path) -> list[dict[str, Any]]:
 
 def main() -> None:
     dataset_path = Path("data")
-    # collection_name = "Pediatric-CT-SEG"
-    collection_name = "CC-Tumor-Heterogeneity"
+    collection_name = "Pediatric-CT-SEG"
+    # collection_name = "CC-Tumor-Heterogeneity"
 
     metadata_dir = dataset_path / "metadata"
     metadata_path = metadata_dir / f"{collection_name}.json"
@@ -42,8 +42,8 @@ def main() -> None:
             f"Modalities: {study.modalities}"
         )
 
-    # filter_mods = ["CT", "RTSTRUCT"]
-    # downloader.filter_by_modalities(None)
+    filter_mods = ["CT", "RTSTRUCT"]
+    downloader.filter_by_modalities(filter_mods)
 
     # print(f"\nAfter filtering to {filter_mods}:")
     print(f"Found {len(downloader.get_ids())} studies.\n")
@@ -57,7 +57,7 @@ def main() -> None:
         )
 
     ids: List[int] = downloader.get_ids()
-    selected_ids = ids[1:2]
+    selected_ids = ids[0:5]
 
     output_dir = dataset_path / collection_name
     downloader.download(selected_ids, path=output_dir)

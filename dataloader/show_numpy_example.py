@@ -28,7 +28,7 @@ def _sorted_study_keys(np_pairing: dict) -> List[Tuple[int, str]]:
 def main() -> None:
     data_root = Path("data_2")
 
-    target_study_idx = 2
+    target_study_idx = 4
 
     loader = Dataloader(data_root)
     collections = loader.available_collections()
@@ -45,7 +45,7 @@ def main() -> None:
 
     x_y_pairing = loader.x_y_pairing(collection_name)
     np_pairing = paths_for_np_pairing(x_y_pairing)
-
+    print("pairing: ", np_pairing)
     if not np_pairing:
         print("No NumPy pairings found.")
         return
@@ -75,7 +75,7 @@ def main() -> None:
     print(f"CT volume: {ct_npy_path}")
     print(f"Segmentation volume: {seg_npy_path}")
 
-    slice_idx = 160  # or any index you like
+    slice_idx = 100  # or any index you like
     fig = plot_volume_slice_from_paths(ct_npy_path, seg_npy_path, slice_idx)
     plt.show()
 

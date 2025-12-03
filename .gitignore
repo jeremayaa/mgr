@@ -3,3 +3,5 @@ __pycache__
 *.csv
 data
 data_2
+exports
+outputs

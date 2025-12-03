@@ -156,24 +156,40 @@ def _rtstruct_to_volume(
 
 
 def pairs_to_numpy(x_y_pairing: PairingDict) -> PairingDict:
+    """Ensure NumPy volumes exist for CT/RTSTRUCT pairs and return updated pairing."""
+    from series_to_numpy import paths_for_np_pairing  # or import at top if same module
+
+    np_pairing = paths_for_np_pairing(x_y_pairing)
     new_pairing: PairingDict = {}
 
-    for study_key, series_map in x_y_pairing.items():
+    for study_key, series_map in np_pairing.items():
         new_series_map: Dict[str, List[str]] = {}
 
-        for ct_series_str, seg_series_list in series_map.items():
-            if not seg_series_list:
+        for ct_npy_str, seg_npy_list in series_map.items():
+            if not seg_npy_list:
                 continue
 
-            ct_dir = Path(ct_series_str)
-            seg_dir = Path(seg_series_list[0])
+            ct_npy_path = Path(ct_npy_str)
+            seg_npy_path = Path(seg_npy_list[0])
 
+            ct_exists = ct_npy_path.exists()
+            seg_exists = seg_npy_path.exists()
+
+            if ct_exists and seg_exists:
+                print(f"Skipping existing volumes: {ct_npy_path}, {seg_npy_path}")
+                new_series_map[str(ct_npy_path)] = [str(seg_npy_path)]
+                continue
+
+            ct_dir = ct_npy_path.parent
+            seg_dir = seg_npy_path.parent
+
+            print(f"Computing volumes for: {ct_dir} and {seg_dir}")
             ct_vol, sop_uids, geometries = _load_ct_volume(ct_dir)
             rtstruct_path = _find_rtstruct_dicom(seg_dir)
             seg_vol = _rtstruct_to_volume(rtstruct_path, sop_uids, geometries)
 
-            ct_npy_path = ct_dir / "ct_volume.npy"
-            seg_npy_path = seg_dir / "rtstruct_labels.npy"
+            ct_npy_path.parent.mkdir(parents=True, exist_ok=True)
+            seg_npy_path.parent.mkdir(parents=True, exist_ok=True)
 
             np.save(ct_npy_path, ct_vol)
             np.save(seg_npy_path, seg_vol)
