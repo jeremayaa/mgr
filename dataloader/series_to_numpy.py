@@ -12,10 +12,16 @@ PairingDict = Dict[str, Dict[str, List[str]]]
 
 
 def _zpos(ds: pydicom.dataset.Dataset) -> float:
+    """
+    Helper function that extracts the slice z-position from a DICOM dataset to allow sorting slices along the patient axis.
+    It tries to use ImagePositionPatient[2] and falls back to InstanceNumber if that is not available.
+    This function is used in _load_ct_volume as the key function for ordering DICOM slices.
+    """
     try:
         return float(ds.ImagePositionPatient[2])
     except Exception:
         return float(getattr(ds, "InstanceNumber", 0))
+
 
 def _world_to_rc(
     points_xyz: np.ndarray,
@@ -24,9 +30,17 @@ def _world_to_rc(
     col_cos: np.ndarray,
     pix_spacing: np.ndarray,
 ) -> np.ndarray:
+    """
+    Convert 3D world (patient) coordinates into 2D image row/column coordinates using CT geometry.
+    It subtracts the slice origin, projects onto the row and column direction cosine vectors, and scales by pixel spacing.
+    The function returns an array of (row, col) indices that are later used to rasterize RTSTRUCT contours.
+    It is called from _rtstruct_to_volume for each contour in an RTSTRUCT structure.
+    """
+
     v = points_xyz - origin_xyz[None, :]
     r = (v @ row_cos) / pix_spacing[0]
     c = (v @ col_cos) / pix_spacing[1]
+
     return np.stack([r, c], axis=1)
 
 
@@ -35,6 +49,12 @@ def _fill_polygon_mask_bbox(
     cols: int,
     poly_rc: np.ndarray,
 ) -> np.ndarray:
+    """
+    Rasterize a polygon defined in (row, col) coordinates into a 2D boolean mask of shape (rows, cols).
+    It computes a bounding box around the polygon, samples points on a pixel-centered grid within that box, and uses matplotlib.path.Path to test point inclusion.
+    The mask is initially all False and is set to True where points fall inside the polygon.
+    This function is called from _rtstruct_to_volume to generate slice-wise segmentation masks from RTSTRUCT contours.
+    """
     mask = np.zeros((rows, cols), dtype=bool)
 
     r_min = max(int(np.floor(poly_rc[:, 0].min())), 0)
@@ -59,6 +79,12 @@ def _fill_polygon_mask_bbox(
 
 
 def _load_ct_volume(ct_series_dir: Path) -> tuple[np.ndarray, List[str], List[Dict[str, Any]]]:
+    """
+    Load a CT series from a directory of DICOM files into a 3D volume in Hounsfield units, along with per-slice geometry metadata.
+    It finds all .dcm files, reads them with pydicom, sorts them by z-position using _zpos, stacks pixel_array into a volume, and applies RescaleSlope/RescaleIntercept.
+    For each slice it also extracts direction cosines, image position, pixel spacing, and image size, storing these as geometry dictionaries.
+    The function is called by pairs_to_numpy when a CT volume needs to be computed and saved as .npy.
+    """
     ct_files = sorted(
         [p for p in ct_series_dir.iterdir() if p.is_file() and p.suffix.lower() == ".dcm"]
     )
@@ -98,6 +124,13 @@ def _load_ct_volume(ct_series_dir: Path) -> tuple[np.ndarray, List[str], List[Di
 
 
 def _find_rtstruct_dicom(rtstruct_series_dir: Path) -> Path:
+    """
+    Search a directory tree for a DICOM file whose Modality is RTSTRUCT and return its path.
+    It recursively scans for .dcm files, reads them with pydicom (without pixel data), and checks the Modality tag.
+    The function returns the first found RTSTRUCT file and raises FileNotFoundError if none is found.
+    It is used by pairs_to_numpy to locate the RTSTRUCT file corresponding to a segmentation series directory.
+    """
+
     for path in sorted(rtstruct_series_dir.rglob("*.dcm")):
         try:
             ds = pydicom.dcmread(str(path), stop_before_pixels=True, force=True)
@@ -114,6 +147,16 @@ def _rtstruct_to_volume(
     sop_uids: List[str],
     geometries: List[Dict[str, Any]],
 ) -> np.ndarray:
+    """
+    Convert an RTSTRUCT DICOM file into a 3D label volume aligned with a given CT volume.
+    It reads the RTSTRUCT, iterates over ROIContourSequence and ContourSequence, 
+    maps contour points from world space to image (row, col) using _world_to_rc, 
+    and rasterizes them with _fill_polygon_mask_bbox.
+    For each contour, it assigns the ROI number as a label in the corresponding slice of seg_vol, 
+    applying a fixed rotation and flip so that the mask matches the CT orientation.
+
+    The function is called by pairs_to_numpy after loading the CT volume via _load_ct_volume.
+    """
     ds = pydicom.dcmread(str(rtstruct_path), stop_before_pixels=True)
 
     depth = len(sop_uids)
@@ -156,7 +199,12 @@ def _rtstruct_to_volume(
 
 
 def pairs_to_numpy(x_y_pairing: PairingDict) -> PairingDict:
-    """Ensure NumPy volumes exist for CT/RTSTRUCT pairs and return updated pairing."""
+    """
+    Ensure that .npy volumes exist for each CT/RTSTRUCT pair described by the x_y_pairing mapping and return a new mapping with .npy paths.
+    It first calls paths_for_np_pairing to convert series directories into target .npy file paths, then iterates over these and checks whether the CT and segmentation .npy files already exist.
+    For missing volumes, it calls _load_ct_volume to build the CT volume, _find_rtstruct_dicom to locate the RTSTRUCT file, and _rtstruct_to_volume to derive the segmentation volume, then saves both arrays to disk.
+    The function returns a new pairing dict that includes only those pairs for which .npy volumes exist or have been generated.
+    """
     from series_to_numpy import paths_for_np_pairing  # or import at top if same module
 
     np_pairing = paths_for_np_pairing(x_y_pairing)
@@ -203,6 +251,12 @@ def pairs_to_numpy(x_y_pairing: PairingDict) -> PairingDict:
 
 
 def paths_for_np_pairing(x_y_pairing: PairingDict) -> PairingDict:
+    """
+    Convert a mapping from CT/RTSTRUCT series directories into a mapping from CT/RTSTRUCT .npy file paths.
+    For each CT series directory, it constructs a fixed output file name 'ct_volume.npy' in that directory and 'rtstruct_labels.npy' in the corresponding RTSTRUCT series directory.
+    It returns a new pairing dict with the same per-study structure but using string paths to the future .npy files instead of the original DICOM series folders.
+    This function is called by pairs_to_numpy to determine where the NumPy volumes should be stored.
+    """
     new_pairing: PairingDict = {}
 
     for study_key, series_map in x_y_pairing.items():

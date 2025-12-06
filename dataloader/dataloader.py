@@ -8,13 +8,24 @@ import pydicom
 
 
 class Dataloader:
-    """Load a dataset from a root folder containing a manifest and downloaded series."""
+    """
+    Dataset access class that encapsulates loading a manifest and resolving CT and RTSTRUCT series directories for each study.
+    It is initialized with a data root directory, from which it reads a manifest.json describing collections and studies.
+    The class exposes methods to list available collections, build CT-to-RTSTRUCT pair mappings, and detect modalities by probing DICOM files in a series directory.
+    Instances of this class are created and used in the main() function in the FIRST script.
+    """
 
     def __init__(self, data_root: str | Path) -> None:
         self.data_root = Path(data_root)
         self.manifest = self._load_manifest()
 
     def _load_manifest(self) -> Dict[str, Any]:
+        """
+        Load the dataset manifest JSON from the data root directory.
+        It constructs the path to 'manifest.json', opens it, and parses its contents into a Python dictionary.
+        If the manifest file does not exist it raises a FileNotFoundError, preventing further use of the Dataloader.
+        This method is called only from __init__ during object construction.
+        """
         manifest_path = self.data_root / "manifest.json"
         if not manifest_path.exists():
             raise FileNotFoundError(f"Manifest not found at {manifest_path}")
@@ -28,7 +39,12 @@ class Dataloader:
         return [c.get("name") for c in collections if c.get("name")]
 
     def x_y_pairing(self, collection_name: str) -> Dict[str, Dict[str, List[str]]]:
-        """Return per-study mappings from image series paths to segmentation series paths."""
+        """
+        Build a per-study mapping from CT series directories (inputs X) to RTSTRUCT series directories (labels Y) for a given collection.
+        It first calls _get_collection_entry to find the matching collection in the manifest, then iterates over its studies and corresponding series_uids.
+        For each series UID, it constructs the series directory path, checks existence, detects the modality using _detect_modality, and categorizes the series as image or segmentation.
+        Finally, it returns a nested dict where each 'study_i' maps CT series directory strings to a list of RTSTRUCT series directory strings, and this mapping is used later by main() and pairs_to_numpy.
+        """
         collection = self._get_collection_entry(collection_name)
         if collection is None:
             raise ValueError(f"Collection {collection_name} not found in manifest")
@@ -71,6 +87,11 @@ class Dataloader:
         return result
 
     def _get_collection_entry(self, collection_name: str) -> Optional[Mapping[str, Any]]:
+        """
+        Retrieve the manifest entry for a given collection name from self.manifest.
+        It scans through the 'collections' list and returns the first entry whose 'name' field equals the requested collection_name.
+        If no such entry exists, it returns None, which leads x_y_pairing to raise a ValueError when called with an unknown collection.
+        """
         collections = self.manifest.get("collections", [])
         for collection in collections:
             if collection.get("name") == collection_name:

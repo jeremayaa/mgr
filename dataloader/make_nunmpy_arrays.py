@@ -18,7 +18,7 @@ def main() -> None:
 
     collection_name = "Pediatric-CT-SEG"
     if collection_name not in collections:
-        collection_name = collections[0]
+        return
 
     print(f"Using collection: {collection_name}")
 
