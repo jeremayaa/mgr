@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-
+from typing import List, Tuple
 from dataloader import Dataloader
 from series_to_numpy import pairs_to_numpy
 
