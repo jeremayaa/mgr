@@ -7,6 +7,12 @@ from series_to_numpy import pairs_to_numpy
 
 
 def main() -> None:
+    """
+    Entry-point function that loads a dataset from a given root folder and prints CT/RTSTRUCT pairings.
+    It constructs a Dataloader, queries available collections, and picks the hard-coded "Pediatric-CT-SEG" collection if present.
+    For that collection it prints the original per-study mapping from CT series folders to RTSTRUCT series folders.
+    It then calls pairs_to_numpy to convert folder-based paths into .npy volume paths (and trigger volume computation) and prints the resulting mapping.
+    """
     data_root = Path("data_2")
 
     loader = Dataloader(data_root)
